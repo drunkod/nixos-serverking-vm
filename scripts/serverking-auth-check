@@ -27,10 +27,11 @@ checks=(
   "create vminstances.apps.cozystack.io"
   "get services"
   "list services"
-  "create services"
   "get ingresses.networking.k8s.io"
   "list ingresses.networking.k8s.io"
-  "create ingresses.networking.k8s.io"
+  "get httpcaches.apps.cozystack.io"
+  "list httpcaches.apps.cozystack.io"
+  "create httpcaches.apps.cozystack.io"
 )
 
 failed=0
