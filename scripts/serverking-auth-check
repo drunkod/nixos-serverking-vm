@@ -46,6 +46,35 @@ for check in "${checks[@]}"; do
   fi
 done
 
+echo
+echo "Gateway API diagnostics..."
+for resource in gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io; do
+  if kubectl api-resources --api-group=gateway.networking.k8s.io -o name | grep -qx "$resource"; then
+    echo "  API  present  $resource"
+  else
+    echo "  API  missing  $resource"
+  fi
+  for verb in get list create; do
+    if kubectl auth can-i "$verb" "$resource" -n "$NAMESPACE" | grep -qx yes; then
+      printf '  yes  %-6s %s\\n' "$verb" "$resource"
+    else
+      printf '  NO   %-6s %s\\n' "$verb" "$resource"
+    fi
+  done
+done
+
+if kubectl auth can-i get namespaces | grep -qx yes; then
+  gateway_annotation="$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.namespace\\.cozystack\\.io/gateway}' 2>/dev/null || true)"
+  echo "  namespace gateway annotation: ${gateway_annotation:-<empty>}"
+else
+  echo "  namespace gateway annotation: <cannot read namespaces>"
+fi
+
+echo "  Gateways visible in $NAMESPACE:"
+kubectl get gateways.gateway.networking.k8s.io -n "$NAMESPACE" -o wide 2>&1 | sed 's/^/    /' || true
+echo "  HTTPRoutes visible in $NAMESPACE:"
+kubectl get httproutes.gateway.networking.k8s.io -n "$NAMESPACE" -o wide 2>&1 | sed 's/^/    /' || true
+
 if (( failed )); then
   echo "Required ServerKing/Cozystack RBAC permissions are missing." >&2
   exit 1
