@@ -1,0 +1,47 @@
+name: Check ServerKing API
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SERVERKING_NAMESPACE: ${{ vars.SERVERKING_NAMESPACE || 'tenant-u665' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install kubelogin
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubelogin.zip \
+            https://github.com/int128/kubelogin/releases/download/v1.36.4/kubelogin_linux_amd64.zip
+          unzip -q /tmp/kubelogin.zip -d /tmp/kubelogin
+          install -m 0755 /tmp/kubelogin/kubelogin "$HOME/.local/bin/kubectl-oidc_login"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore ServerKing kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.SERVERKING_KUBECONFIG_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBECONFIG_B64"
+          umask 077
+          echo "$KUBECONFIG_B64" | base64 --decode > "$RUNNER_TEMP/serverking-kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/serverking-kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Verify tooling
+        run: |
+          kubectl version --client
+          kubectl oidc-login --version
+
+      - name: Test authentication
+        run: |
+          set -euo pipefail
+          timeout 30s kubectl auth can-i get vmdisks.apps.cozystack.io -n "$SERVERKING_NAMESPACE"
