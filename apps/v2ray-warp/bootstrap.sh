@@ -166,11 +166,14 @@ done
 systemctl is-enabled --quiet nix-v2ray-warp.service
 systemctl is-active --quiet nix-v2ray-warp.service
 
-CURL_PATH="$(nix build nixpkgs#curl --no-link --print-out-paths)"
+# Resolve exactly one curl executable from the Nix shell. The curl derivation
+# has multiple outputs, so nix build --print-out-paths is not safe here.
+# shellcheck disable=SC2016
+CURL_BIN="$(nix shell nixpkgs#curl -c sh -c 'command -v curl')"
 TRACE=""
 WARP_READY=false
 for _ in $(seq 1 60); do
-  TRACE="$("$CURL_PATH/bin/curl" --fail --silent --show-error --max-time 10 --socks5-hostname 127.0.0.1:10808 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+  TRACE="$("$CURL_BIN" --fail --silent --show-error --max-time 10 --socks5-hostname 127.0.0.1:10808 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
   if printf '%s\n' "$TRACE" | grep -q '^warp=on$'; then
     WARP_READY=true
     break
