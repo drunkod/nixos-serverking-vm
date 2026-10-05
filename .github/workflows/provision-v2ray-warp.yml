@@ -1,0 +1,112 @@
+name: Provision V2Ray WARP VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: VM/project name
+        required: true
+        default: v2ray-warp-01
+      instance_type:
+        description: Cozystack instance type
+        required: true
+        default: u1.small
+      disk_size:
+        description: Root disk size
+        required: true
+        default: 20Gi
+      base_disk:
+        description: Golden VMDisk
+        required: true
+        default: nixos-26-05-v1
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SERVERKING_NAMESPACE: ${{ vars.SERVERKING_NAMESPACE || 'tenant-u665' }}
+      SERVERKING_STORAGE_CLASS: ${{ vars.SERVERKING_STORAGE_CLASS || 'replicated2' }}
+      SSH_PUBLIC_KEY: ${{ vars.SERVERKING_SSH_PUBLIC_KEY }}
+      EXTERNAL_PORTS: "22,8080"
+      APPLICATION_PROFILE: v2ray-warp
+      DISK_SOURCE_MODE: auto
+      INFRA_REF: ${{ github.sha }}
+      V2RAY_WARP_REF: 84953e1c8c15ea550cb51d161cfca7f9ec96ef3b
+      WAIT_TIMEOUT: 20m
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Create ServerKing kubeconfig
+        env:
+          SERVERKING_TOKEN: ${{ secrets.SERVERKING_TOKEN }}
+          SERVERKING_CA_B64: ${{ secrets.SERVERKING_CA_B64 }}
+        run: |
+          set -euo pipefail
+          KUBECONFIG_PATH="$(./scripts/write-ci-kubeconfig "$RUNNER_TEMP/serverking-kubeconfig")"
+          echo "KUBECONFIG=$KUBECONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Verify tenant API access
+        run: ./scripts/serverking-auth-check
+
+      - name: Provision VM and embed application bootstrap
+        run: |
+          ./scripts/provision-vm             "${{ inputs.name }}"             "${{ inputs.instance_type }}"             "${{ inputs.disk_size }}"             "${{ inputs.base_disk }}"
+
+      - name: Resolve public IP
+        id: network
+        env:
+          VM_NAME: ${{ inputs.name }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 120); do
+            PUBLIC_IP="$(kubectl get "service/vm-instance-$VM_NAME"               -n "$SERVERKING_NAMESPACE"               -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+            if [ -n "$PUBLIC_IP" ]; then
+              echo "public_ip=$PUBLIC_IP" >> "$GITHUB_OUTPUT"
+              echo "Public IP: $PUBLIC_IP"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "LoadBalancer IP was not assigned in time." >&2
+          exit 1
+
+      - name: Wait for application listener
+        env:
+          PUBLIC_IP: ${{ steps.network.outputs.public_ip }}
+        run: |
+          set -euo pipefail
+          echo "Waiting for V2Ray bootstrap to expose TCP/8080..."
+          for _ in $(seq 1 180); do
+            if nc -z -w 3 "$PUBLIC_IP" 8080; then
+              echo "TCP/8080 is reachable."
+              sleep 20
+              nc -z -w 3 "$PUBLIC_IP" 8080
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "V2Ray listener did not become ready in time." >&2
+          exit 1
+
+      - name: Summary
+        env:
+          PUBLIC_IP: ${{ steps.network.outputs.public_ip }}
+          VM_NAME: ${{ inputs.name }}
+        run: |
+          {
+            echo "## V2Ray WARP VM"
+            echo
+            echo "- VM: \`$VM_NAME\`"
+            echo "- Public IP: \`$PUBLIC_IP\`"
+            echo "- SSH: \`root@$PUBLIC_IP\`"
+            echo "- V2Ray: \`$PUBLIC_IP:8080\`"
+            echo "- VMess UUID: generated only inside the VM"
+            echo "- Client renderer: \`/root/render-v2ray-client $PUBLIC_IP\`"
+            echo "- WARP state: \`/var/lib/nix-v2ray-warp\`"
+          } >> "$GITHUB_STEP_SUMMARY"
