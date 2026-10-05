@@ -1,0 +1,28 @@
+apiVersion: apps.cozystack.io/v1alpha1
+kind: VMInstance
+metadata:
+  name: example
+  namespace: tenant-u665
+spec:
+  instanceProfile: linux.efi
+  instanceType: u1.small
+  disks:
+    - name: example-root
+  runStrategy: Always
+  external: true
+  externalMethod: PortList
+  externalPorts:
+    - 22
+  externalAllowICMP: true
+  sshKeys:
+    - ssh-ed25519 REPLACE_WITH_PUBLIC_KEY
+  cloudInit: |
+    #cloud-config
+    hostname: example
+    manage_etc_hosts: true
+  cloudInitSeed: example-001
+  networks: []
+  subnets: []
+  gpus: []
+  resources: {}
+  cpuModel: ""

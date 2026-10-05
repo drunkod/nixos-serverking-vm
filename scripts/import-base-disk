@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 <disk-name> <image-url> [storage]" >&2
+  exit 2
+}
+
+[[ $# -ge 2 && $# -le 3 ]] || usage
+
+NAME="$1"
+IMAGE_URL="$2"
+STORAGE="${3:-10Gi}"
+NAMESPACE="${SERVERKING_NAMESPACE:-tenant-u665}"
+STORAGE_CLASS="${SERVERKING_STORAGE_CLASS:-replicated2}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
+
+[[ "$NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || {
+  echo "Invalid Kubernetes name: $NAME" >&2
+  exit 2
+}
+
+if kubectl get "vmdisk.apps.cozystack.io/$NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+  existing_url="$(kubectl get "vmdisk.apps.cozystack.io/$NAME" -n "$NAMESPACE" -o jsonpath='{.spec.source.http.url}')"
+  existing_storage="$(kubectl get "vmdisk.apps.cozystack.io/$NAME" -n "$NAMESPACE" -o jsonpath='{.spec.storage}')"
+  existing_class="$(kubectl get "vmdisk.apps.cozystack.io/$NAME" -n "$NAMESPACE" -o jsonpath='{.spec.storageClass}')"
+
+  if [[ "$existing_url" != "$IMAGE_URL" || "$existing_storage" != "$STORAGE" || "$existing_class" != "$STORAGE_CLASS" ]]; then
+    echo "VMDisk $NAME already exists with a different specification." >&2
+    exit 1
+  fi
+
+  echo "VMDisk $NAME already exists with the requested specification."
+else
+  export NAME IMAGE_URL STORAGE STORAGE_CLASS NAMESPACE
+  python3 - <<'PY' | kubectl create -f -
+import json
+import os
+import sys
+
+json.dump(
+    {
+        "apiVersion": "apps.cozystack.io/v1alpha1",
+        "kind": "VMDisk",
+        "metadata": {
+            "name": os.environ["NAME"],
+            "namespace": os.environ["NAMESPACE"],
+        },
+        "spec": {
+            "optical": False,
+            "source": {"http": {"url": os.environ["IMAGE_URL"]}},
+            "storage": os.environ["STORAGE"],
+            "storageClass": os.environ["STORAGE_CLASS"],
+        },
+    },
+    sys.stdout,
+)
+PY
+fi
+
+echo "Waiting for VMDisk/$NAME to become Ready..."
+kubectl wait --for=condition=Ready   "vmdisk.apps.cozystack.io/$NAME"   -n "$NAMESPACE"   --timeout="$WAIT_TIMEOUT"
+
+kubectl get "vmdisk.apps.cozystack.io/$NAME"   -n "$NAMESPACE"   -o custom-columns='NAME:.metadata.name,STORAGE:.spec.storage,CLASS:.spec.storageClass,READY:.status.conditions[?(@.type=="Ready")].status'

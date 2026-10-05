@@ -1,0 +1,55 @@
+name: Provision ServerKing VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: VM/project name
+        required: true
+      base_disk:
+        description: Existing golden VMDisk
+        required: true
+        default: nixos-26-05-v1
+      instance_type:
+        description: Cozystack instance type
+        required: true
+        default: u1.small
+      disk_size:
+        description: Root disk size
+        required: true
+        default: 20Gi
+      external_ports:
+        description: Comma-separated TCP ports
+        required: true
+        default: "22"
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    env:
+      SERVERKING_NAMESPACE: ${{ vars.SERVERKING_NAMESPACE || 'tenant-u665' }}
+      SERVERKING_STORAGE_CLASS: ${{ vars.SERVERKING_STORAGE_CLASS || 'replicated2' }}
+      SSH_PUBLIC_KEY: ${{ vars.SERVERKING_SSH_PUBLIC_KEY }}
+      EXTERNAL_PORTS: ${{ inputs.external_ports }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Restore ServerKing kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.SERVERKING_KUBECONFIG_B64 }}
+        run: |
+          test -n "$KUBECONFIG_B64"
+          umask 077
+          echo "$KUBECONFIG_B64" | base64 --decode > "$RUNNER_TEMP/serverking-kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/serverking-kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Verify tenant API access
+        run: ./scripts/serverking-auth-check
+
+      - name: Provision VM from golden disk
+        run: ./scripts/provision-vm "${{ inputs.name }}" "${{ inputs.instance_type }}" "${{ inputs.disk_size }}" "${{ inputs.base_disk }}"

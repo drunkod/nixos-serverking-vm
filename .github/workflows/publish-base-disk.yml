@@ -1,0 +1,45 @@
+name: Import ServerKing base disk
+
+on:
+  workflow_dispatch:
+    inputs:
+      disk_name:
+        description: Cozystack VMDisk name
+        required: true
+        default: nixos-26-05-v1
+      image_url:
+        description: Public qcow2 URL, typically a GitHub Release asset
+        required: true
+      storage:
+        description: Base disk size
+        required: true
+        default: 10Gi
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    env:
+      SERVERKING_NAMESPACE: ${{ vars.SERVERKING_NAMESPACE || 'tenant-u665' }}
+      SERVERKING_STORAGE_CLASS: ${{ vars.SERVERKING_STORAGE_CLASS || 'replicated2' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Restore ServerKing kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.SERVERKING_KUBECONFIG_B64 }}
+        run: |
+          test -n "$KUBECONFIG_B64"
+          umask 077
+          echo "$KUBECONFIG_B64" | base64 --decode > "$RUNNER_TEMP/serverking-kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/serverking-kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Verify tenant API access
+        run: ./scripts/serverking-auth-check
+
+      - name: Import base VMDisk
+        run: ./scripts/import-base-disk "${{ inputs.disk_name }}" "${{ inputs.image_url }}" "${{ inputs.storage }}"
