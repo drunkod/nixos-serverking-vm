@@ -11,8 +11,14 @@ Environment:
   SERVERKING_STORAGE_CLASS   default: replicated2
   SSH_PUBLIC_KEY             public key to inject
   SSH_PUBLIC_KEY_FILE        fallback public-key file
-  EXTERNAL_PORTS             comma-separated, default: 22
-  WAIT_TIMEOUT               kubectl wait timeout, default: 10m
+  EXTERNAL_PORTS             comma-separated; defaults by application profile
+  WAIT_TIMEOUT               Kubernetes wait timeout, default: 20m
+  APPLICATION_PROFILE        none | v2ray-warp, default: none
+  DISK_SOURCE_MODE           auto | clone | http, default: auto
+  BASE_IMAGE_URL             optional HTTP image override
+  INFRA_REF                  hosting repository ref embedded into bootstrap
+  V2RAY_WARP_REF             nix-v2ray-warp git ref/commit
+  CLOUD_INIT_FILE            optional custom user-data file
 EOF
   exit 2
 }
@@ -27,9 +33,33 @@ ROOT_DISK="${VM_NAME}-root"
 
 NAMESPACE="${SERVERKING_NAMESPACE:-tenant-u665}"
 STORAGE_CLASS="${SERVERKING_STORAGE_CLASS:-replicated2}"
-EXTERNAL_PORTS="${EXTERNAL_PORTS:-22}"
-WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-20m}"
 SSH_PUBLIC_KEY_FILE="${SSH_PUBLIC_KEY_FILE:-nixos-minimal.pub}"
+APPLICATION_PROFILE="${APPLICATION_PROFILE:-none}"
+DISK_SOURCE_MODE="${DISK_SOURCE_MODE:-auto}"
+INFRA_REF="${INFRA_REF:-main}"
+V2RAY_WARP_REF="${V2RAY_WARP_REF:-84953e1c8c15ea550cb51d161cfca7f9ec96ef3b}"
+
+case "$APPLICATION_PROFILE" in
+  none)
+    EXTERNAL_PORTS="${EXTERNAL_PORTS:-22}"
+    ;;
+  v2ray-warp)
+    EXTERNAL_PORTS="${EXTERNAL_PORTS:-22,8080}"
+    ;;
+  *)
+    echo "Unsupported APPLICATION_PROFILE: $APPLICATION_PROFILE" >&2
+    exit 2
+    ;;
+esac
+
+case "$DISK_SOURCE_MODE" in
+  auto|clone|http) ;;
+  *)
+    echo "Unsupported DISK_SOURCE_MODE: $DISK_SOURCE_MODE" >&2
+    exit 2
+    ;;
+esac
 
 [[ "$VM_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || {
   echo "Invalid VM name: $VM_NAME" >&2
@@ -44,25 +74,109 @@ if [[ -z "${SSH_PUBLIC_KEY:-}" ]]; then
   SSH_PUBLIC_KEY="$(tr -d '\r\n' < "$SSH_PUBLIC_KEY_FILE")"
 fi
 
-kubectl get "vmdisk.apps.cozystack.io/$BASE_DISK" -n "$NAMESPACE" >/dev/null
+BASE_JSON="$(kubectl get "vmdisk.apps.cozystack.io/$BASE_DISK" -n "$NAMESPACE" -o json)"
+BASE_HTTP_URL="$(printf '%s' "$BASE_JSON" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print(d.get("spec",{}).get("source",{}).get("http",{}).get("url",""))
+')"
+BASE_IMAGE_URL="${BASE_IMAGE_URL:-$BASE_HTTP_URL}"
+
+if [[ "$DISK_SOURCE_MODE" == "auto" ]]; then
+  if [[ -n "$BASE_IMAGE_URL" ]]; then
+    EFFECTIVE_DISK_SOURCE="http"
+  else
+    EFFECTIVE_DISK_SOURCE="clone"
+  fi
+else
+  EFFECTIVE_DISK_SOURCE="$DISK_SOURCE_MODE"
+fi
+
+if [[ "$EFFECTIVE_DISK_SOURCE" == "http" && -z "$BASE_IMAGE_URL" ]]; then
+  echo "HTTP disk source requested, but no BASE_IMAGE_URL and base VMDisk has no spec.source.http.url." >&2
+  exit 1
+fi
+
+echo "Disk source mode: $EFFECTIVE_DISK_SOURCE"
+if [[ "$EFFECTIVE_DISK_SOURCE" == "http" ]]; then
+  echo "Using HTTP source inherited from golden VMDisk."
+else
+  echo "Using VMDisk clone source: $BASE_DISK"
+fi
+
+CLOUD_INIT_TMP="$(mktemp)"
+trap 'rm -f "$CLOUD_INIT_TMP"' EXIT
+
+if [[ -n "${CLOUD_INIT_FILE:-}" ]]; then
+  cp "$CLOUD_INIT_FILE" "$CLOUD_INIT_TMP"
+elif [[ "$APPLICATION_PROFILE" == "v2ray-warp" ]]; then
+  [[ -f apps/v2ray-warp/bootstrap.sh ]] || {
+    echo "apps/v2ray-warp/bootstrap.sh is missing" >&2
+    exit 1
+  }
+  VM_NAME="$VM_NAME" INFRA_REF="$INFRA_REF" V2RAY_WARP_REF="$V2RAY_WARP_REF" \
+    python3 - <<'PY' > "$CLOUD_INIT_TMP"
+import os
+from pathlib import Path
+
+text = Path("apps/v2ray-warp/bootstrap.sh").read_text()
+for key in ("VM_NAME", "INFRA_REF", "V2RAY_WARP_REF"):
+    text = text.replace(f"__{key}__", os.environ[key])
+print(text, end="")
+PY
+else
+  cat > "$CLOUD_INIT_TMP" <<EOF
+#cloud-config
+hostname: $VM_NAME
+manage_etc_hosts: true
+EOF
+fi
 
 if kubectl get "vmdisk.apps.cozystack.io/$ROOT_DISK" -n "$NAMESPACE" >/dev/null 2>&1; then
-  source_name="$(kubectl get "vmdisk.apps.cozystack.io/$ROOT_DISK" -n "$NAMESPACE" -o jsonpath='{.spec.source.disk.name}')"
-  existing_size="$(kubectl get "vmdisk.apps.cozystack.io/$ROOT_DISK" -n "$NAMESPACE" -o jsonpath='{.spec.storage}')"
-  existing_class="$(kubectl get "vmdisk.apps.cozystack.io/$ROOT_DISK" -n "$NAMESPACE" -o jsonpath='{.spec.storageClass}')"
+  export ROOT_DISK DISK_SIZE STORAGE_CLASS EFFECTIVE_DISK_SOURCE BASE_DISK BASE_IMAGE_URL NAMESPACE
+  EXISTING_DISK_JSON="$(mktemp)"
+  kubectl get "vmdisk.apps.cozystack.io/$ROOT_DISK" -n "$NAMESPACE" -o json > "$EXISTING_DISK_JSON"
+  python3 - "$EXISTING_DISK_JSON" <<'PY'
+import json
+import os
+import sys
 
-  if [[ "$source_name" != "$BASE_DISK" || "$existing_size" != "$DISK_SIZE" || "$existing_class" != "$STORAGE_CLASS" ]]; then
-    echo "VMDisk $ROOT_DISK already exists with a different specification." >&2
-    exit 1
-  fi
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+spec = d.get("spec", {})
+errors = []
+if spec.get("storage") != os.environ["DISK_SIZE"]:
+    errors.append(f"storage={spec.get('storage')!r}")
+if spec.get("storageClass") != os.environ["STORAGE_CLASS"]:
+    errors.append(f"storageClass={spec.get('storageClass')!r}")
 
-  echo "Root disk $ROOT_DISK already exists."
+source = spec.get("source", {})
+if os.environ["EFFECTIVE_DISK_SOURCE"] == "http":
+    got = source.get("http", {}).get("url")
+    if got != os.environ["BASE_IMAGE_URL"]:
+        errors.append(f"http.url={got!r}")
+else:
+    got = source.get("disk", {}).get("name")
+    if got != os.environ["BASE_DISK"]:
+        errors.append(f"disk.name={got!r}")
+
+if errors:
+    print("Existing root disk has a different specification: " + ", ".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+PY
+  rm -f "$EXISTING_DISK_JSON"
+  echo "Root disk $ROOT_DISK already exists with the requested specification."
 else
-  export ROOT_DISK BASE_DISK DISK_SIZE STORAGE_CLASS NAMESPACE
+  export ROOT_DISK BASE_DISK BASE_IMAGE_URL DISK_SIZE STORAGE_CLASS NAMESPACE EFFECTIVE_DISK_SOURCE
   python3 - <<'PY' | kubectl create -f -
 import json
 import os
 import sys
+
+if os.environ["EFFECTIVE_DISK_SOURCE"] == "http":
+    source = {"http": {"url": os.environ["BASE_IMAGE_URL"]}}
+else:
+    source = {"disk": {"name": os.environ["BASE_DISK"]}}
 
 json.dump(
     {
@@ -74,7 +188,7 @@ json.dump(
         },
         "spec": {
             "optical": False,
-            "source": {"disk": {"name": os.environ["BASE_DISK"]}},
+            "source": source,
             "storage": os.environ["DISK_SIZE"],
             "storageClass": os.environ["STORAGE_CLASS"],
         },
@@ -84,24 +198,48 @@ json.dump(
 PY
 fi
 
-echo "Waiting for root disk..."
+echo "Waiting for VMDisk application resource..."
 kubectl wait --for=condition=Ready   "vmdisk.apps.cozystack.io/$ROOT_DISK"   -n "$NAMESPACE"   --timeout="$WAIT_TIMEOUT"
 
 if kubectl get "vminstance.apps.cozystack.io/$VM_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-  attached="$(kubectl get "vminstance.apps.cozystack.io/$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.disks[0].name}')"
-  if [[ "$attached" != "$ROOT_DISK" ]]; then
-    echo "VMInstance $VM_NAME already exists with a different root disk." >&2
-    exit 1
-  fi
+  export VM_NAME ROOT_DISK INSTANCE_TYPE EXTERNAL_PORTS NAMESPACE
+  EXISTING_VM_JSON="$(mktemp)"
+  kubectl get "vminstance.apps.cozystack.io/$VM_NAME" -n "$NAMESPACE" -o json > "$EXISTING_VM_JSON"
+  python3 - "$EXISTING_VM_JSON" <<'PY'
+import json
+import os
+import sys
 
-  echo "VMInstance $VM_NAME already exists."
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+spec = d.get("spec", {})
+errors = []
+disks = spec.get("disks", [])
+attached = disks[0].get("name") if disks else None
+if attached != os.environ["ROOT_DISK"]:
+    errors.append(f"root disk={attached!r}")
+if spec.get("instanceType") != os.environ["INSTANCE_TYPE"]:
+    errors.append(f"instanceType={spec.get('instanceType')!r}")
+
+wanted_ports = sorted({int(x.strip()) for x in os.environ["EXTERNAL_PORTS"].split(",") if x.strip()})
+got_ports = sorted(spec.get("externalPorts", []))
+if got_ports != wanted_ports:
+    errors.append(f"externalPorts={got_ports!r}")
+
+if errors:
+    print("Existing VMInstance has a different specification: " + ", ".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+PY
+  rm -f "$EXISTING_VM_JSON"
+  echo "VMInstance $VM_NAME already exists with the requested infrastructure specification."
 else
-  export VM_NAME ROOT_DISK INSTANCE_TYPE NAMESPACE SSH_PUBLIC_KEY EXTERNAL_PORTS
+  export VM_NAME ROOT_DISK INSTANCE_TYPE NAMESPACE SSH_PUBLIC_KEY EXTERNAL_PORTS CLOUD_INIT_TMP
   python3 - <<'PY' | kubectl create -f -
 import json
 import os
 import sys
 import time
+from pathlib import Path
 
 ports = []
 for value in os.environ["EXTERNAL_PORTS"].split(","):
@@ -114,6 +252,8 @@ for value in os.environ["EXTERNAL_PORTS"].split(","):
     ports.append(port)
 
 name = os.environ["VM_NAME"]
+cloud_init = Path(os.environ["CLOUD_INIT_TMP"]).read_text()
+
 json.dump(
     {
         "apiVersion": "apps.cozystack.io/v1alpha1",
@@ -132,7 +272,7 @@ json.dump(
             "externalPorts": sorted(set(ports)),
             "externalAllowICMP": True,
             "sshKeys": [os.environ["SSH_PUBLIC_KEY"]],
-            "cloudInit": f"#cloud-config\nhostname: {name}\nmanage_etc_hosts: true\n",
+            "cloudInit": cloud_init,
             "cloudInitSeed": f"{name}-{int(time.time())}",
             "networks": [],
             "subnets": [],
@@ -146,12 +286,34 @@ json.dump(
 PY
 fi
 
-echo "Waiting for VMInstance..."
+echo "Waiting for VMInstance application resource..."
 kubectl wait --for=condition=Ready   "vminstance.apps.cozystack.io/$VM_NAME"   -n "$NAMESPACE"   --timeout="$WAIT_TIMEOUT"
+
+echo "Waiting for actual KubeVirt guest readiness..."
+KUBEVIRT_VM="vm-instance-$VM_NAME"
+for _ in $(seq 1 60); do
+  if kubectl get "virtualmachine.kubevirt.io/$KUBEVIRT_VM" -n "$NAMESPACE" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+kubectl wait --for=condition=Ready   "virtualmachine.kubevirt.io/$KUBEVIRT_VM"   -n "$NAMESPACE"   --timeout="$WAIT_TIMEOUT"
+
+PRINTABLE_STATUS="$(kubectl get "virtualmachine.kubevirt.io/$KUBEVIRT_VM" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}')"
+if [[ "$PRINTABLE_STATUS" != "Running" ]]; then
+  echo "KubeVirt VM is not Running: $PRINTABLE_STATUS" >&2
+  kubectl get "virtualmachine.kubevirt.io/$KUBEVIRT_VM" -n "$NAMESPACE" -o wide >&2 || true
+  exit 1
+fi
 
 echo
 echo "Provisioning result:"
 kubectl get "vminstance.apps.cozystack.io/$VM_NAME"   -n "$NAMESPACE"   -o custom-columns='NAME:.metadata.name,TYPE:.spec.instanceType,PROFILE:.spec.instanceProfile,READY:.status.conditions[?(@.type=="Ready")].status'
+
+echo "KubeVirt status: $PRINTABLE_STATUS"
+echo "Application profile: $APPLICATION_PROFILE"
+echo "Disk source: $EFFECTIVE_DISK_SOURCE"
 
 echo
 echo "Network services:"

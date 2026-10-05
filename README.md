@@ -88,11 +88,14 @@ export SERVERKING_NAMESPACE=tenant-u665
 ./scripts/serverking-auth-check
 ```
 
-For GitHub Actions, store a base64 encoded kubeconfig as the repository secret:
+For GitHub Actions, use the tenant service-account credential:
 
 ```text
-SERVERKING_KUBECONFIG_B64
+SERVERKING_TOKEN
+SERVERKING_CA_B64
 ```
+
+The workflows construct an ephemeral kubeconfig on the runner. This avoids interactive Keycloak/OIDC login in CI.
 
 Optional repository variables:
 
@@ -126,15 +129,19 @@ Provisioning flow:
 
 ```text
 verify base VMDisk
-  -> create my-project-root from source.disk.name
-  -> wait VMDisk Ready
+  -> choose disk source
+       -> HTTP import when the golden VMDisk has an HTTP source
+       -> VMDisk clone when explicitly requested/appropriate
+  -> create my-project-root
   -> create VMInstance
-  -> linux.efi / u1.small
-  -> inject SSH key + cloud-init hostname
+  -> linux.efi / requested instance type
+  -> inject SSH key + cloud-init
   -> expose requested TCP ports
-  -> wait VM Ready
+  -> wait for the underlying KubeVirt VM Ready/Running
   -> print matching Service / address
 ```
+
+`DISK_SOURCE_MODE=auto` is the safe default. ServerKing's `WaitForFirstConsumer` storage can leave a golden VMDisk application object `Ready` before its backing PVC is materialized; in that case CDI clone can fail with `source/target size info missing`. If the golden disk came from HTTP, auto mode reuses that image URL for the new root disk instead.
 
 The script is retry-safe for matching resources and fails if an object with the same name has a conflicting root disk/spec.
 
@@ -168,6 +175,31 @@ Run **Provision ServerKing VM** with:
 - root disk size
 - exposed TCP ports
 
+
+### Provision V2Ray + WARP in one workflow
+
+Run **Provision V2Ray WARP VM**. The workflow pins the application to:
+
+```text
+https://github.com/drunkod/nix-v2ray-warp
+commit 84953e1c8c15ea550cb51d161cfca7f9ec96ef3b
+```
+
+The VM receives a first-boot bootstrap through `VMInstance.spec.cloudInit`. It clones the pinned app, generates a unique VMess UUID only inside the guest, creates persistent WARP state, installs the Nix-built stack, creates a declarative NixOS systemd service, opens TCP/8080, runs `nixos-rebuild switch`, and verifies `warp=on`.
+
+No VMess UUID is stored in GitHub Actions, repository variables, or cloud-init.
+
+On the VM:
+
+```text
+/root/render-v2ray-client <PUBLIC_IP_OR_HOSTNAME>
+/var/lib/nix-v2ray-warp/vmess-uuid
+/var/lib/nix-v2ray-warp/wgcf-account.toml
+/var/lib/nix-v2ray-warp/wireproxy.conf
+```
+
+The public ServerKing Service exposes TCP 22 and 8080. Ports 40000 and 10808 remain loopback-only inside the guest.
+
 ## Manual reinstall / recovery
 
 The original Disko + nixos-anywhere path is retained:
@@ -182,15 +214,18 @@ nix run github:nix-community/nixos-anywhere -- \
 
 This path destroys and recreates `/dev/vda` and should not be the normal provisioning mechanism.
 
-## Next milestone
+## Verified deployment
 
-The first end-to-end acceptance test is:
+The first real application VM has been validated end-to-end:
 
-1. Build the 10 GiB qcow2 in GitHub Actions.
-2. Publish it as a release asset.
-3. Import it as `nixos-26-05-v1`.
-4. Clone it into a test root VMDisk.
-5. Create a test VMInstance.
-6. Wait for Ready.
-7. Verify external IP and SSH.
-8. Confirm a larger clone expands the root filesystem automatically.
+```text
+VM:            v2ray-warp-01
+instance type: u1.small
+root disk:     20 GiB
+external:      22/tcp, 8080/tcp
+application:   nix-v2ray-warp
+WARP:          warp=on
+reboot test:   passed
+```
+
+The 10 GiB golden image expands its root partition/filesystem to the requested 20 GiB guest disk. The application service is declarative and returns automatically after reboot.
