@@ -1,0 +1,41 @@
+name: Check ServerKing API
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/check-serverking-api.yml"
+      - "scripts/write-ci-kubeconfig"
+      - "scripts/serverking-auth-check"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SERVERKING_NAMESPACE: ${{ vars.SERVERKING_NAMESPACE || 'tenant-u665' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Create ServerKing kubeconfig
+        env:
+          SERVERKING_TOKEN: ${{ secrets.SERVERKING_TOKEN }}
+          SERVERKING_CA_B64: ${{ secrets.SERVERKING_CA_B64 }}
+        run: |
+          set -euo pipefail
+          KUBECONFIG_PATH="$(./scripts/write-ci-kubeconfig "$RUNNER_TEMP/serverking-kubeconfig")"
+          echo "KUBECONFIG=$KUBECONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Verify credentials format
+        run: |
+          set -euo pipefail
+          kubectl config current-context
+          kubectl config view --minify --raw >/dev/null
+
+      - name: Verify tenant API access
+        run: ./scripts/serverking-auth-check

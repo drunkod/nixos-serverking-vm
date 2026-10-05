@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NAMESPACE="${SERVERKING_NAMESPACE:-tenant-u665}"
+
+if [[ -z "${KUBECONFIG:-}" ]]; then
+  echo "KUBECONFIG is not set" >&2
+  exit 2
+fi
+
+command -v kubectl >/dev/null || {
+  echo "kubectl is required" >&2
+  exit 2
+}
+
+echo "Checking tenant-scoped Kubernetes API access..."
+# Do not use kubectl cluster-info here: it reads Services in kube-system,
+# which a correctly scoped ServerKing tenant service account cannot access.
+kubectl get vmdisks.apps.cozystack.io -n "$NAMESPACE" --request-timeout=10s >/dev/null
+
+checks=(
+  "get vmdisks.apps.cozystack.io"
+  "list vmdisks.apps.cozystack.io"
+  "create vmdisks.apps.cozystack.io"
+  "get vminstances.apps.cozystack.io"
+  "list vminstances.apps.cozystack.io"
+  "create vminstances.apps.cozystack.io"
+  "get services"
+  "list services"
+)
+
+failed=0
+for check in "${checks[@]}"; do
+  verb="${check%% *}"
+  resource="${check#* }"
+  if kubectl auth can-i "$verb" "$resource" -n "$NAMESPACE" | grep -qx yes; then
+    printf '  yes  %-6s %s\n' "$verb" "$resource"
+  else
+    printf '  NO   %-6s %s\n' "$verb" "$resource" >&2
+    failed=1
+  fi
+done
+
+if (( failed )); then
+  echo "Required ServerKing/Cozystack RBAC permissions are missing." >&2
+  exit 1
+fi
+
+echo "ServerKing API access is ready for namespace: $NAMESPACE"

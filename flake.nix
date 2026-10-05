@@ -1,5 +1,5 @@
 {
-  description = "ServerKing Cozystack NixOS VM";
+  description = "ServerKing Cozystack NixOS VM and reusable golden image";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -7,14 +7,33 @@
     disko.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { nixpkgs, disko, ... }: {
-    nixosConfigurations.nixos-minimal = nixpkgs.lib.nixosSystem {
+  outputs = { nixpkgs, disko, ... }:
+    let
       system = "x86_64-linux";
-      modules = [
-        disko.nixosModules.disko
-        ./disko.nix
-        ./configuration.nix
-      ];
+
+      installedSystem = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          disko.nixosModules.disko
+          ./disko.nix
+          ./configuration.nix
+        ];
+      };
+
+      imageSystem = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./image.nix
+        ];
+      };
+    in
+    {
+      nixosConfigurations.nixos-minimal = installedSystem;
+      nixosConfigurations.serverking-image = imageSystem;
+
+      packages.${system} = {
+        serverking-image = imageSystem.config.system.build.serverkingImage;
+        default = imageSystem.config.system.build.serverkingImage;
+      };
     };
-  };
 }

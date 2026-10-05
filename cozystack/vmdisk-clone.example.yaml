@@ -1,0 +1,12 @@
+apiVersion: apps.cozystack.io/v1alpha1
+kind: VMDisk
+metadata:
+  name: example-root
+  namespace: tenant-u665
+spec:
+  optical: false
+  source:
+    disk:
+      name: nixos-26-05-v1
+  storage: 20Gi
+  storageClass: replicated2
