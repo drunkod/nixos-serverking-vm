@@ -26,6 +26,7 @@ jobs:
           curl -fsSL -o /tmp/kubelogin.zip \
             https://github.com/int128/kubelogin/releases/download/v1.36.4/kubelogin_linux_amd64.zip
           unzip -q /tmp/kubelogin.zip -d /tmp/kubelogin
+          mkdir -p "$HOME/.local/bin"
           install -m 0755 /tmp/kubelogin/kubelogin "$HOME/.local/bin/kubectl-oidc_login"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
