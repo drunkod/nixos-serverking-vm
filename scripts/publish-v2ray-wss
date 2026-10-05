@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VM_NAME="${1:?usage: publish-v2ray-wss <vm-name>}"
+NAMESPACE="${SERVERKING_NAMESPACE:-tenant-u665}"
+STORAGE_CLASS="${SERVERKING_STORAGE_CLASS:-replicated2}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-20m}"
+SERVICE="vm-instance-$VM_NAME"
+
+CLUSTER_IP="$(kubectl get "service/$SERVICE" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')"
+[[ -n "$CLUSTER_IP" && "$CLUSTER_IP" != "None" ]] || {
+  echo "Service $SERVICE has no ClusterIP" >&2
+  exit 1
+}
+
+HOSTNAME="$VM_NAME.eu-host.serverking.cloud"
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+
+cat >"$TMP" <<EOF
+apiVersion: apps.cozystack.io/v1alpha1
+kind: HTTPCache
+metadata:
+  name: $VM_NAME
+  namespace: $NAMESPACE
+spec:
+  size: 1Gi
+  storageClass: $STORAGE_CLASS
+  external: true
+  endpoints:
+    - "$CLUSTER_IP:8080"
+  haproxy:
+    replicas: 1
+    resourcesPreset: t1.nano
+  nginx:
+    replicas: 1
+    resourcesPreset: t1.nano
+EOF
+
+echo "Validating managed HTTPS endpoint..."
+kubectl apply --dry-run=server -f "$TMP"
+
+if kubectl get "httpcache.apps.cozystack.io/$VM_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+  kubectl apply -f "$TMP"
+else
+  kubectl create -f "$TMP"
+fi
+
+kubectl wait --for=condition=Ready "httpcache.apps.cozystack.io/$VM_NAME"   -n "$NAMESPACE" --timeout="$WAIT_TIMEOUT"
+
+echo "Waiting for TLS/WebSocket route: $HOSTNAME"
+for _ in $(seq 1 120); do
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "https://$HOSTNAME/" 2>/dev/null || true)"
+  if [[ "$code" != "000" && -n "$code" ]]; then
+    echo "HTTPS status: $code"
+    break
+  fi
+  sleep 5
+done
+
+curl -sS -I --max-time 10 "https://$HOSTNAME/" | head -20 || true
+
+WS_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10   -H 'Connection: Upgrade'   -H 'Upgrade: websocket'   -H 'Sec-WebSocket-Version: 13'   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=='   "https://$HOSTNAME/v2ray-endpoint" 2>/dev/null || true)"
+
+echo "WebSocket handshake HTTP status: $WS_CODE"
+printf '%s\n' "$HOSTNAME"

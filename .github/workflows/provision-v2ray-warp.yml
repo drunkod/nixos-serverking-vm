@@ -94,9 +94,17 @@ jobs:
           echo "V2Ray listener did not become ready in time." >&2
           exit 1
 
+      - name: Publish managed HTTPS/WSS endpoint
+        id: wss
+        run: |
+          set -euo pipefail
+          HOSTNAME="$(./scripts/publish-v2ray-wss "${{ inputs.name }}" | tee /dev/stderr | tail -n1)"
+          echo "hostname=$HOSTNAME" >> "$GITHUB_OUTPUT"
+
       - name: Summary
         env:
           PUBLIC_IP: ${{ steps.network.outputs.public_ip }}
+          WSS_HOSTNAME: ${{ steps.wss.outputs.hostname }}
           VM_NAME: ${{ inputs.name }}
         run: |
           {
@@ -105,7 +113,9 @@ jobs:
             echo "- VM: \`$VM_NAME\`"
             echo "- Public IP: \`$PUBLIC_IP\`"
             echo "- SSH: \`root@$PUBLIC_IP\`"
-            echo "- V2Ray: \`$PUBLIC_IP:8080\`"
+            echo "- Direct V2Ray: \`$PUBLIC_IP:8080\`"
+            echo "- Managed TLS hostname: \`$WSS_HOSTNAME:443\`"
+            echo "- WebSocket path: \`/v2ray-endpoint\`"
             echo "- VMess UUID: generated only inside the VM"
             echo "- Client renderer: \`/root/render-v2ray-client $PUBLIC_IP\`"
             echo "- WARP state: \`/var/lib/nix-v2ray-warp\`"
