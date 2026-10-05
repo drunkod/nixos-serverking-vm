@@ -18,13 +18,11 @@
   boot.growPartition = true;
   boot.kernelParams = [ "console=ttyS0" ];
 
-  boot.loader.systemd-boot.enable = false;
-  boot.loader.grub = {
-    enable = true;
-    device = "/dev/vda";
-    efiSupport = true;
-    efiInstallAsRemovable = true;
-  };
+  # Follow nixpkgs' EFI qcow2 image pattern: systemd-boot owns the ESP.
+  # grub.device is still declared because make-disk-image expects a target
+  # block device while preparing the image.
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.grub.device = "/dev/vda";
   boot.loader.efi.canTouchEfiVariables = false;
   boot.loader.timeout = 0;
 
