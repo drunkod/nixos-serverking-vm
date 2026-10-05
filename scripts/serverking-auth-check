@@ -13,8 +13,10 @@ command -v kubectl >/dev/null || {
   exit 2
 }
 
-echo "Checking Kubernetes API access..."
-kubectl cluster-info >/dev/null
+echo "Checking tenant-scoped Kubernetes API access..."
+# Do not use kubectl cluster-info here: it reads Services in kube-system,
+# which a correctly scoped ServerKing tenant service account cannot access.
+kubectl get vmdisks.apps.cozystack.io -n "$NAMESPACE" --request-timeout=10s >/dev/null
 
 checks=(
   "get vmdisks.apps.cozystack.io"
