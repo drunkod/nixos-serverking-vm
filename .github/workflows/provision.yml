@@ -39,14 +39,14 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
-      - name: Restore ServerKing kubeconfig
+      - name: Create ServerKing kubeconfig
         env:
-          KUBECONFIG_B64: ${{ secrets.SERVERKING_KUBECONFIG_B64 }}
+          SERVERKING_TOKEN: ${{ secrets.SERVERKING_TOKEN }}
+          SERVERKING_CA_B64: ${{ secrets.SERVERKING_CA_B64 }}
         run: |
-          test -n "$KUBECONFIG_B64"
-          umask 077
-          echo "$KUBECONFIG_B64" | base64 --decode > "$RUNNER_TEMP/serverking-kubeconfig"
-          echo "KUBECONFIG=$RUNNER_TEMP/serverking-kubeconfig" >> "$GITHUB_ENV"
+          set -euo pipefail
+          KUBECONFIG_PATH="$(./scripts/write-ci-kubeconfig "$RUNNER_TEMP/serverking-kubeconfig")"
+          echo "KUBECONFIG=$KUBECONFIG_PATH" >> "$GITHUB_ENV"
 
       - name: Verify tenant API access
         run: ./scripts/serverking-auth-check
