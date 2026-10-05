@@ -166,8 +166,19 @@ done
 systemctl is-enabled --quiet nix-v2ray-warp.service
 systemctl is-active --quiet nix-v2ray-warp.service
 
-TRACE="$(nix shell nixpkgs#curl -c curl --fail --silent --show-error --max-time 30 --socks5-hostname 127.0.0.1:10808 https://cloudflare.com/cdn-cgi/trace)"
-if ! printf '%s\n' "$TRACE" | grep -q '^warp=on$'; then
+CURL_PATH="$(nix build nixpkgs#curl --no-link --print-out-paths)"
+TRACE=""
+WARP_READY=false
+for _ in $(seq 1 60); do
+  TRACE="$("$CURL_PATH/bin/curl" --fail --silent --show-error --max-time 10 --socks5-hostname 127.0.0.1:10808 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+  if printf '%s\n' "$TRACE" | grep -q '^warp=on$'; then
+    WARP_READY=true
+    break
+  fi
+  sleep 2
+done
+
+if [[ "$WARP_READY" != true ]]; then
   echo "WARP verification failed; stopping application service." >&2
   systemctl stop nix-v2ray-warp.service || true
   exit 1
