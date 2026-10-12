@@ -76,6 +76,13 @@ cat > "$HOST_CONFIG_DIR/service.nix" <<EOF
   networking.hostName = lib.mkForce "$VM_NAME";
   networking.firewall.allowedTCPPorts = [ $LISTEN_PORT ];
 
+  networking.nat = {
+    enable = true;
+    internalInterfaces = [ "tun0" ];
+    internalIPs = [ "10.144.144.0/24" ];
+    externalInterface = "enp1s0";
+  };
+
   services.easytier = {
     enable = true;
 
@@ -99,6 +106,7 @@ cat > "$HOST_CONFIG_DIR/service.nix" <<EOF
           encryption_algorithm = "aes-gcm";
           enable_ipv6 = false;
           enable_exit_node = true;
+          proxy_forward_by_system = true;
           private_mode = true;
           multi_thread = true;
         };
