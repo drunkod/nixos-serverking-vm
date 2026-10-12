@@ -3,64 +3,114 @@ set -euo pipefail
 
 VM_NAME="${1:?usage: publish-v2ray-wss <vm-name>}"
 NAMESPACE="${SERVERKING_NAMESPACE:-tenant-u665}"
-STORAGE_CLASS="${SERVERKING_STORAGE_CLASS:-replicated2}"
-WAIT_TIMEOUT="${WAIT_TIMEOUT:-20m}"
 SERVICE="vm-instance-$VM_NAME"
+BACKEND_PORT="${V2RAY_BACKEND_PORT:-8080}"
+WS_PATH="${V2RAY_WS_PATH:-/v2ray-endpoint}"
+HOSTNAME="${V2RAY_HOSTNAME:-$VM_NAME.eu-host.serverking.cloud}"
+INGRESS_NAME="${V2RAY_INGRESS_NAME:-$VM_NAME-wss}"
+INGRESS_CLASS="${SERVERKING_INGRESS_CLASS:-$NAMESPACE}"
+TLS_SECRET="${SERVERKING_INGRESS_TLS_SECRET:-wildcard-eu-host-tls}"
 
-CLUSTER_IP="$(kubectl get "service/$SERVICE" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')"
-[[ -n "$CLUSTER_IP" && "$CLUSTER_IP" != "None" ]] || {
-  echo "Service $SERVICE has no ClusterIP" >&2
-  exit 1
-}
-
-HOSTNAME="$VM_NAME.eu-host.serverking.cloud"
 TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
+HEADERS="$(mktemp)"
+trap 'rm -f "$TMP" "$HEADERS"' EXIT
 
-cat >"$TMP" <<EOF
-apiVersion: apps.cozystack.io/v1alpha1
-kind: HTTPCache
+kubectl get "service/$SERVICE" -n "$NAMESPACE" >/dev/null
+
+cat >"$TMP" <<YAML
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
-  name: $VM_NAME
+  name: $INGRESS_NAME
   namespace: $NAMESPACE
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
-  size: 1Gi
-  storageClass: $STORAGE_CLASS
-  external: true
-  endpoints:
-    - "$CLUSTER_IP:8080"
-  haproxy:
-    replicas: 1
-    resourcesPreset: t1.nano
-  nginx:
-    replicas: 1
-    resourcesPreset: t1.nano
-EOF
+  ingressClassName: $INGRESS_CLASS
+  tls:
+    - hosts:
+        - $HOSTNAME
+      secretName: $TLS_SECRET
+  rules:
+    - host: $HOSTNAME
+      http:
+        paths:
+          - path: $WS_PATH
+            pathType: Prefix
+            backend:
+              service:
+                name: $SERVICE
+                port:
+                  number: $BACKEND_PORT
+YAML
 
-echo "Validating managed HTTPS endpoint..."
-kubectl apply --dry-run=server -f "$TMP"
+echo "Ingress target:"
+echo "  namespace: $NAMESPACE"
+echo "  ingress:   $INGRESS_NAME"
+echo "  class:     $INGRESS_CLASS"
+echo "  hostname:  $HOSTNAME"
+echo "  backend:   $SERVICE:$BACKEND_PORT$WS_PATH"
 
-if kubectl get "httpcache.apps.cozystack.io/$VM_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-  kubectl apply -f "$TMP"
-else
-  kubectl create -f "$TMP"
-fi
-
-kubectl wait --for=condition=Ready "httpcache.apps.cozystack.io/$VM_NAME"   -n "$NAMESPACE" --timeout="$WAIT_TIMEOUT"
-
-echo "Waiting for TLS/WebSocket route: $HOSTNAME"
-for _ in $(seq 1 120); do
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "https://$HOSTNAME/" 2>/dev/null || true)"
-  if [[ "$code" != "000" && -n "$code" ]]; then
-    echo "HTTPS status: $code"
-    break
+missing=()
+for verb in get create patch update; do
+  if ! kubectl auth can-i "$verb" ingresses.networking.k8s.io -n "$NAMESPACE" | grep -qx yes; then
+    missing+=("$verb")
   fi
-  sleep 5
 done
 
-curl -sS -I --max-time 10 "https://$HOSTNAME/" | head -20 || true
+if ((${#missing[@]})); then
+  echo "ERROR: Kubernetes RBAC does not allow this identity to publish the Ingress." >&2
+  echo "Missing verbs on networking.k8s.io/ingresses in $NAMESPACE: ${missing[*]}" >&2
+  echo "Ask ServerKing to grant create/patch/update on namespaced Ingress resources or expose a supported route-publishing API." >&2
+  exit 13
+fi
 
-WS_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10   -H 'Connection: Upgrade'   -H 'Upgrade: websocket'   -H 'Sec-WebSocket-Version: 13'   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=='   "https://$HOSTNAME/v2ray-endpoint" 2>/dev/null || true)"
+echo "Validating Ingress with the API server..."
+kubectl apply --dry-run=server -f "$TMP" >/dev/null
 
-echo "WebSocket handshake HTTP status: $WS_CODE"
+echo "Publishing TLS/WebSocket Ingress..."
+kubectl apply -f "$TMP"
+
+echo "Waiting for ingress address..."
+deadline=$((SECONDS + 300))
+INGRESS_IP=""
+while (( SECONDS < deadline )); do
+  INGRESS_IP="$(kubectl get ingress "$INGRESS_NAME" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+  [[ -n "$INGRESS_IP" ]] && break
+  sleep 2
+done
+
+if [[ -z "$INGRESS_IP" ]]; then
+  echo "ERROR: Ingress did not receive an address within 5 minutes." >&2
+  kubectl get ingress "$INGRESS_NAME" -n "$NAMESPACE" -o wide >&2 || true
+  exit 14
+fi
+
+echo "Ingress address: $INGRESS_IP"
+
+CONTROLLER_SERVICE="${NAMESPACE#tenant-}-ingress-controller"
+CONTROLLER_IP="$(kubectl get service "$CONTROLLER_SERVICE" -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+if [[ -n "$CONTROLLER_IP" && "$CONTROLLER_IP" != "$INGRESS_IP" ]]; then
+  echo "ERROR: Ingress address $INGRESS_IP does not match $CONTROLLER_SERVICE address $CONTROLLER_IP." >&2
+  exit 15
+fi
+
+echo "Checking WebSocket Upgrade directly on the tenant ingress controller..."
+set +e
+curl -sS --http1.1 --max-time 5   --resolve "$HOSTNAME:443:$INGRESS_IP"   -D "$HEADERS" -o /dev/null   -H 'Connection: Upgrade'   -H 'Upgrade: websocket'   -H 'Sec-WebSocket-Version: 13'   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=='   "https://$HOSTNAME$WS_PATH"
+curl_rc=$?
+set -e
+
+if ! grep -Eq '^HTTP/1\.1 101( |$)' "$HEADERS"; then
+  echo "ERROR: WebSocket handshake did not return HTTP 101." >&2
+  sed -n '1,20p' "$HEADERS" >&2
+  exit 16
+fi
+
+echo "WebSocket Upgrade: HTTP 101 (curl exit $curl_rc after the upgraded socket remains open is expected)."
+echo "Public DNS should converge to: $INGRESS_IP"
 printf '%s\n' "$HOSTNAME"
