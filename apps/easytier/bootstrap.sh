@@ -62,7 +62,7 @@ cat > "$HOST_CONFIG_DIR/flake.nix" <<EOF
     nixosConfigurations.$VM_NAME = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        "${infra}/image.nix"
+        "\${infra}/image.nix"
         ./service.nix
       ];
     };
