@@ -28,7 +28,7 @@ jobs:
       SERVERKING_NAMESPACE: ${{ vars.SERVERKING_NAMESPACE || 'tenant-u665' }}
       SERVERKING_STORAGE_CLASS: ${{ vars.SERVERKING_STORAGE_CLASS || 'replicated2' }}
       SSH_PUBLIC_KEY: ${{ vars.SERVERKING_SSH_PUBLIC_KEY }}
-      EXTERNAL_PORTS: "22,11010"
+      EXTERNAL_PORTS: "22,11010,11011,443"
       APPLICATION_PROFILE: easytier
       DISK_SOURCE_MODE: auto
       INFRA_REF: ${{ github.sha }}

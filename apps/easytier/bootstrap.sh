@@ -74,7 +74,7 @@ cat > "$HOST_CONFIG_DIR/service.nix" <<EOF
 { lib, ... }:
 {
   networking.hostName = lib.mkForce "$VM_NAME";
-  networking.firewall.allowedTCPPorts = [ $LISTEN_PORT ];
+  networking.firewall.allowedTCPPorts = [ $LISTEN_PORT 11011 443 ];
 
   networking.nat = {
     enable = true;
@@ -94,6 +94,8 @@ cat > "$HOST_CONFIG_DIR/service.nix" <<EOF
         ipv4 = "$VIRTUAL_IPV4";
         listeners = [
           "tcp://0.0.0.0:$LISTEN_PORT"
+          "ws://0.0.0.0:11011/"
+          "wss://0.0.0.0:443/"
         ];
         peers = [ ];
       };
