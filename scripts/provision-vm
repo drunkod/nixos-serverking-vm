@@ -13,7 +13,7 @@ Environment:
   SSH_PUBLIC_KEY_FILE        fallback public-key file
   EXTERNAL_PORTS             comma-separated; defaults by application profile
   WAIT_TIMEOUT               Kubernetes wait timeout, default: 20m
-  APPLICATION_PROFILE        none | v2ray-warp, default: none
+  APPLICATION_PROFILE        none | v2ray-warp | easytier, default: none
   DISK_SOURCE_MODE           auto | clone | http, default: auto
   BASE_IMAGE_URL             optional HTTP image override
   INFRA_REF                  hosting repository ref embedded into bootstrap
@@ -46,6 +46,9 @@ case "$APPLICATION_PROFILE" in
     ;;
   v2ray-warp)
     EXTERNAL_PORTS="${EXTERNAL_PORTS:-22,8080}"
+    ;;
+  easytier)
+    EXTERNAL_PORTS="${EXTERNAL_PORTS:-22,11010}"
     ;;
   *)
     echo "Unsupported APPLICATION_PROFILE: $APPLICATION_PROFILE" >&2
@@ -121,6 +124,21 @@ from pathlib import Path
 
 text = Path("apps/v2ray-warp/bootstrap.sh").read_text()
 for key in ("VM_NAME", "INFRA_REF", "V2RAY_WARP_REF"):
+    text = text.replace(f"__{key}__", os.environ[key])
+print(text, end="")
+PY
+elif [[ "$APPLICATION_PROFILE" == "easytier" ]]; then
+  [[ -f apps/easytier/bootstrap.sh ]] || {
+    echo "apps/easytier/bootstrap.sh is missing" >&2
+    exit 1
+  }
+  VM_NAME="$VM_NAME" INFRA_REF="$INFRA_REF" \
+    python3 - <<'PY' > "$CLOUD_INIT_TMP"
+import os
+from pathlib import Path
+
+text = Path("apps/easytier/bootstrap.sh").read_text()
+for key in ("VM_NAME", "INFRA_REF"):
     text = text.replace(f"__{key}__", os.environ[key])
 print(text, end="")
 PY
